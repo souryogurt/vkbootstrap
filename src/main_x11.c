@@ -12,6 +12,8 @@
 #include <getopt.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#define VK_USE_PLATFORM_XLIB_KHR
+#include <vulkan/vulkan.h>
 
 /** Window type */
 typedef struct game_window_t {
@@ -184,30 +186,69 @@ static void parse_args (int argc, char *const *argv)
     }
 }
 
+static VkResult
+create_vulkan_instance (Display *display, Window window, VkInstance *vk)
+{
+    uint32_t enabledLayerCount = 0;
+    const char *const *ppEnabledLayerNames = NULL;
+    uint32_t enabledExtensionCount = 1;
+    const char *ppEnabledExtensionNames[] = {VK_KHR_XLIB_SURFACE_EXTENSION_NAME};
+    VkApplicationInfo pApplicationInfo = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pNext = NULL,
+        .pApplicationName = "VKBootstrap",
+        .applicationVersion = 0x00000100,
+        .pEngineName = NULL,
+        .engineVersion = 0,
+        .apiVersion = VK_API_VERSION_1_0,
+    };
+    VkInstanceCreateInfo pCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .pApplicationInfo = &pApplicationInfo,
+        .enabledLayerCount = enabledLayerCount,
+        .ppEnabledLayerNames = ppEnabledLayerNames,
+        .enabledExtensionCount = enabledExtensionCount,
+        .ppEnabledExtensionNames = ppEnabledExtensionNames,
+    };
+    return vkCreateInstance (&pCreateInfo, NULL, vk);
+}
+
 int main (int argc, char *const *argv)
 {
+    int error = EXIT_SUCCESS;
     Display *display = NULL;
-
+    VkInstance vk = VK_NULL_HANDLE;
+    XInitThreads();
     parse_args (argc, argv);
 
     display = XOpenDisplay (NULL);
     if (display == NULL) {
         fprintf (stderr, "%s: can't connect to X server\n", program_name);
-        return EXIT_FAILURE;
+        error = EXIT_FAILURE;
+        goto out;
     }
 
     main_window = window_create (display, "Vulkan Window", 640, 480);
     if (main_window == NULL) {
         fprintf (stderr, "%s: can't create game window\n", program_name);
-        XCloseDisplay (display);
-        return EXIT_FAILURE;
+        error = EXIT_FAILURE;
+        goto out;
+    }
+    if (create_vulkan_instance (display, window_get_native (main_window), &vk)) {
+        fprintf (stderr, "%s: can't load vulkan\n", program_name);
+        error = EXIT_FAILURE;
+        goto out;
     }
     while (window_is_exists (main_window)) {
         window_process_events (main_window);
         /*game_tick();*/
         /* eglSwapBuffers (egl_display, window_surface);*/
     }
+out:
+    vkDestroyInstance (vk, NULL);
     window_destroy (main_window);
     XCloseDisplay (display);
-    return EXIT_SUCCESS;
+    return error;
 }
