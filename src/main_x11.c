@@ -51,6 +51,31 @@ static struct option const long_options[] = {
     {NULL, 0, NULL, 0}
 };
 
+#define MAX_PHYSICAL_DEVICES 100
+#define MAX_QUEUE_FAMILY_PROPERTIES 100
+
+static const VkApplicationInfo pApplicationInfo = {
+    .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+    .pNext = NULL,
+    .pApplicationName = "VKBootstrap",
+    .applicationVersion = 0x00000100,
+    .pEngineName = NULL,
+    .engineVersion = 0,
+    .apiVersion = VK_API_VERSION_1_0,
+};
+static const char *const ppEnabledInstanceExtensionNames[] = {
+    VK_KHR_XLIB_SURFACE_EXTENSION_NAME
+};
+static const VkInstanceCreateInfo instanceCreateInfo = {
+    .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    .pNext = NULL,
+    .flags = 0,
+    .pApplicationInfo = &pApplicationInfo,
+    .enabledLayerCount = 0,
+    .ppEnabledLayerNames = NULL,
+    .enabledExtensionCount = 1,
+    .ppEnabledExtensionNames = ppEnabledInstanceExtensionNames,
+};
 /** Print usage information */
 static void print_usage (void)
 {
@@ -186,33 +211,172 @@ static void parse_args (int argc, char *const *argv)
     }
 }
 
-static VkResult
-create_vulkan_instance (Display *display, Window window, VkInstance *vk)
+static void
+print_device_properties (uint32_t index, VkPhysicalDeviceProperties *properties)
 {
-    uint32_t enabledLayerCount = 0;
-    const char *const *ppEnabledLayerNames = NULL;
-    uint32_t enabledExtensionCount = 1;
-    const char *ppEnabledExtensionNames[] = {VK_KHR_XLIB_SURFACE_EXTENSION_NAME};
-    VkApplicationInfo pApplicationInfo = {
-        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pNext = NULL,
-        .pApplicationName = "VKBootstrap",
-        .applicationVersion = 0x00000100,
-        .pEngineName = NULL,
-        .engineVersion = 0,
-        .apiVersion = VK_API_VERSION_1_0,
+    const char *const deviceTypes[] = {
+        "other",
+        "integrated gpu",
+        "discrete gpu",
+        "virtual gpu",
+        "cpu"
     };
-    VkInstanceCreateInfo pCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    printf ("Device %d\n"
+            "API:            0x%08x\n"
+            "driverVersion:  0x%08x\n"
+            "vendorID:       0x%08x\n"
+            "deviceID:       0x%08x\n"
+            "deviceType:     %s\n"
+            "deviceName:     %s\n",
+            index,
+            properties->apiVersion,
+            properties->driverVersion,
+            properties->vendorID,
+            properties->deviceID,
+            deviceTypes[properties->deviceType],
+            properties->deviceName);
+}
+
+static void
+print_device_queues (uint32_t queueFamilyCount,
+                     VkQueueFamilyProperties *queueFamilies)
+{
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        printf ("Queue Family %d\n  Flags:    ", i);
+        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            printf ("GRAPHICS ");
+        }
+        if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            printf ("COMPUTE ");
+        }
+        if (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) {
+            printf ("TRANSFER ");
+        }
+        if (queueFamilies[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) {
+            printf ("SPARSE_BINDING ");
+        }
+        printf ("\n  queueCount:    %d\n", queueFamilies[i].queueCount);
+    }
+}
+
+static VkResult
+create_device (VkInstance vk, VkDevice *pDevice)
+{
+    uint32_t enabledDeviceExtensionCount = 1;
+    const char *const ppEnabledDeviceExtensionNames[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    uint32_t queueFamilyIndex = 0;
+    float queuePriorities[] = {1.0f};
+    VkPhysicalDeviceProperties properties;
+    VkQueueFamilyProperties queueFamilyProperties[MAX_QUEUE_FAMILY_PROPERTIES];
+    uint32_t queuePrioritiesCount = MAX_QUEUE_FAMILY_PROPERTIES;
+    VkDeviceQueueCreateInfo pQueueCreateInfos[1] = {{
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .queueFamilyIndex = queueFamilyIndex,
+            .queueCount = 1,
+            .pQueuePriorities = queuePriorities,
+        }
+    };
+    VkDeviceCreateInfo deviceCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = NULL,
         .flags = 0,
-        .pApplicationInfo = &pApplicationInfo,
-        .enabledLayerCount = enabledLayerCount,
-        .ppEnabledLayerNames = ppEnabledLayerNames,
-        .enabledExtensionCount = enabledExtensionCount,
-        .ppEnabledExtensionNames = ppEnabledExtensionNames,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = pQueueCreateInfos,
+        .enabledLayerCount = 0,
+        .ppEnabledLayerNames = NULL,
+        .enabledExtensionCount = enabledDeviceExtensionCount,
+        .ppEnabledExtensionNames = ppEnabledDeviceExtensionNames,
+        .pEnabledFeatures = NULL,
     };
-    return vkCreateInstance (&pCreateInfo, NULL, vk);
+    uint32_t physicalDeviceCount = MAX_PHYSICAL_DEVICES;
+    VkPhysicalDevice physicalDevices[MAX_PHYSICAL_DEVICES];
+    VkResult result = vkEnumeratePhysicalDevices (vk, &physicalDeviceCount,
+                      physicalDevices);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+        goto out;
+    }
+    for (uint32_t i = 0; i < physicalDeviceCount; i++) {
+        vkGetPhysicalDeviceProperties (physicalDevices[i], &properties);
+        if (verbose) {
+            print_device_properties (i, &properties);
+        }
+        vkGetPhysicalDeviceQueueFamilyProperties (physicalDevices[i],
+                &queuePrioritiesCount, queueFamilyProperties);
+        if (verbose) {
+            print_device_queues (queuePrioritiesCount, queueFamilyProperties);
+        }
+    }
+    return vkCreateDevice (physicalDevices[0], &deviceCreateInfo, NULL, pDevice);
+out:
+    return result;
+}
+
+static const char *
+get_vulkan_error_string (VkResult result)
+{
+    switch (result) {
+        case VK_SUCCESS:
+            return "success";
+        case VK_NOT_READY:
+            return "not ready";
+        case VK_TIMEOUT:
+            return "timeout";
+        case VK_EVENT_SET:
+            return "event set";
+        case VK_EVENT_RESET:
+            return "event reset";
+        case VK_INCOMPLETE:
+            return "incomplete";
+        case VK_ERROR_OUT_OF_HOST_MEMORY:
+            return "out of host memory";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+            return "out of device memory";
+        case VK_ERROR_INITIALIZATION_FAILED:
+            return "initialization failed";
+        case VK_ERROR_DEVICE_LOST:
+            return "device lost";
+        case VK_ERROR_MEMORY_MAP_FAILED:
+            return "memory map failed";
+        case VK_ERROR_LAYER_NOT_PRESENT:
+            return "layer not present";
+        case VK_ERROR_EXTENSION_NOT_PRESENT:
+            return "extension not present";
+        case VK_ERROR_FEATURE_NOT_PRESENT:
+            return "feature not present";
+        case VK_ERROR_INCOMPATIBLE_DRIVER:
+            return "incompatible driver";
+        case VK_ERROR_TOO_MANY_OBJECTS:
+            return "too many objects";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED:
+            return "format not supported";
+        case VK_ERROR_FRAGMENTED_POOL:
+            return "fragmented pool";
+        case VK_ERROR_SURFACE_LOST_KHR:
+            return "surface lost";
+        case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR:
+            return "native window in use";
+        case VK_SUBOPTIMAL_KHR:
+            return "suboptimal";
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            return "out of date";
+        case VK_ERROR_INCOMPATIBLE_DISPLAY_KHR:
+            return "incompatible display";
+        case VK_ERROR_VALIDATION_FAILED_EXT:
+            return "validation failed";
+        case VK_ERROR_INVALID_SHADER_NV:
+            return "invalid shader";
+        case VK_ERROR_OUT_OF_POOL_MEMORY_KHR:
+            return "out of pool memory";
+        case VK_ERROR_INVALID_EXTERNAL_HANDLE_KHX:
+            return "invalid external handle";
+        case VK_RESULT_RANGE_SIZE:
+        case VK_RESULT_MAX_ENUM:
+        default:
+            break;
+    }
+    return NULL;
 }
 
 int main (int argc, char *const *argv)
@@ -220,6 +384,8 @@ int main (int argc, char *const *argv)
     int error = EXIT_SUCCESS;
     Display *display = NULL;
     VkInstance vk = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkResult result = VK_SUCCESS;
     XInitThreads();
     parse_args (argc, argv);
 
@@ -236,8 +402,14 @@ int main (int argc, char *const *argv)
         error = EXIT_FAILURE;
         goto out;
     }
-    if (create_vulkan_instance (display, window_get_native (main_window), &vk)) {
+    if (vkCreateInstance (&instanceCreateInfo, NULL, &vk)) {
         fprintf (stderr, "%s: can't load vulkan\n", program_name);
+        error = EXIT_FAILURE;
+        goto out;
+    }
+    if ((result = create_device (vk, &device))) {
+        fprintf (stderr, "%s: can't create vulkan device: %s\n", program_name,
+                 get_vulkan_error_string (result));
         error = EXIT_FAILURE;
         goto out;
     }
@@ -247,6 +419,7 @@ int main (int argc, char *const *argv)
         /* eglSwapBuffers (egl_display, window_surface);*/
     }
 out:
+    vkDestroyDevice (device, NULL);
     vkDestroyInstance (vk, NULL);
     window_destroy (main_window);
     XCloseDisplay (display);
