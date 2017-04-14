@@ -379,12 +379,28 @@ get_vulkan_error_string (VkResult result)
     return NULL;
 }
 
+static VkResult
+create_surface (Display *display, Window window, VkInstance vk,
+                VkSurfaceKHR *surface)
+{
+    VkXlibSurfaceCreateInfoKHR SurfaceCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+        .pNext = NULL,
+        .flags = 0,
+        .dpy = display,
+        .window = window,
+    };
+    return vkCreateXlibSurfaceKHR (vk, &SurfaceCreateInfo, NULL, surface);
+}
+
 int main (int argc, char *const *argv)
 {
     int error = EXIT_SUCCESS;
     Display *display = NULL;
     VkInstance vk = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
+    VkQueue queue = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkResult result = VK_SUCCESS;
     XInitThreads();
     parse_args (argc, argv);
@@ -413,12 +429,21 @@ int main (int argc, char *const *argv)
         error = EXIT_FAILURE;
         goto out;
     }
+    if ((result = create_surface (display, window_get_native (main_window), vk,
+                                  &surface))) {
+        fprintf (stderr, "%s: can't create surface: %s\n", program_name,
+                 get_vulkan_error_string (result));
+        error = EXIT_FAILURE;
+        goto out;
+    }
+    vkGetDeviceQueue (device, 0, 0, &queue);
     while (window_is_exists (main_window)) {
         window_process_events (main_window);
         /*game_tick();*/
         /* eglSwapBuffers (egl_display, window_surface);*/
     }
 out:
+    vkDestroySurfaceKHR (vk, surface, NULL);
     vkDestroyDevice (device, NULL);
     vkDestroyInstance (vk, NULL);
     window_destroy (main_window);
