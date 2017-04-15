@@ -53,7 +53,17 @@ static struct option const long_options[] = {
 
 #define MAX_PHYSICAL_DEVICES 100
 #define MAX_QUEUE_FAMILY_PROPERTIES 100
-
+PFN_vkGetPhysicalDeviceSurfaceSupportKHR fpGetPhysicalDeviceSurfaceSupportKHR;
+PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+fpGetPhysicalDeviceSurfaceCapabilitiesKHR;
+PFN_vkGetPhysicalDeviceSurfaceFormatsKHR fpGetPhysicalDeviceSurfaceFormatsKHR;
+PFN_vkGetPhysicalDeviceSurfacePresentModesKHR
+fpGetPhysicalDeviceSurfacePresentModesKHR;
+PFN_vkCreateSwapchainKHR fpCreateSwapchainKHR;
+PFN_vkDestroySwapchainKHR fpDestroySwapchainKHR;
+PFN_vkGetSwapchainImagesKHR fpGetSwapchainImagesKHR;
+PFN_vkAcquireNextImageKHR fpAcquireNextImageKHR;
+PFN_vkQueuePresentKHR fpQueuePresentKHR;
 static const VkApplicationInfo pApplicationInfo = {
     .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
     .pNext = NULL,
@@ -260,7 +270,8 @@ print_device_queues (uint32_t queueFamilyCount,
 }
 
 static VkResult
-create_device (VkInstance vk, VkDevice *pDevice)
+create_device (VkInstance vk, VkPhysicalDevice *pPhysicalDevice,
+               VkDevice *pDevice)
 {
     uint32_t enabledDeviceExtensionCount = 1;
     const char *const ppEnabledDeviceExtensionNames[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -308,7 +319,9 @@ create_device (VkInstance vk, VkDevice *pDevice)
             print_device_queues (queuePrioritiesCount, queueFamilyProperties);
         }
     }
-    return vkCreateDevice (physicalDevices[0], &deviceCreateInfo, NULL, pDevice);
+    /* TODO: We are just getting first physical device */
+    *pPhysicalDevice = physicalDevices[0];
+    return vkCreateDevice (*pPhysicalDevice, &deviceCreateInfo, NULL, pDevice);
 out:
     return result;
 }
@@ -393,14 +406,181 @@ create_surface (Display *display, Window window, VkInstance vk,
     return vkCreateXlibSurfaceKHR (vk, &SurfaceCreateInfo, NULL, surface);
 }
 
+static VkResult
+create_swapchain (VkPhysicalDevice physicalDevice, VkDevice device,
+                  VkSurfaceKHR surface, VkSwapchainKHR *swapchain)
+{
+    VkSurfaceCapabilitiesKHR SurfaceCapabilities = {0};
+    VkResult result = VK_SUCCESS;
+    uint32_t presentModeCount = 100;
+    VkPresentModeKHR presentModes[100];
+    const uint32_t QueueFamilyIndeces[] = {0};
+    VkSwapchainCreateInfoKHR SwapchainCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = NULL,
+        .flags = 0,
+        .surface = surface,
+        .minImageCount = 2,
+        .imageFormat = VK_FORMAT_R8G8B8A8_SRGB,
+        .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        .imageExtent = {.width = 640, .height = 480},
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 1,
+        .pQueueFamilyIndices = QueueFamilyIndeces,
+        .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+        .clipped = VK_TRUE,
+        .oldSwapchain = NULL,
+    };
+    result = fpGetPhysicalDeviceSurfaceCapabilitiesKHR (physicalDevice, surface,
+             &SurfaceCapabilities);
+    if (result != VK_SUCCESS) {
+        fprintf (stderr, "%s: can't get physical device capabilities: %s\n",
+                 program_name,
+                 get_vulkan_error_string (result));
+        return result;
+    }
+    if (verbose) {
+        printf ("minImageCount: %d\n", SurfaceCapabilities.minImageCount);
+        printf ("maxImageCount: %d\n", SurfaceCapabilities.maxImageCount);
+        printf ("current extent %dx%d\n",
+                SurfaceCapabilities.currentExtent.width,
+                SurfaceCapabilities.currentExtent.height);
+        printf ("min extent %dx%d\n",
+                SurfaceCapabilities.minImageExtent.width,
+                SurfaceCapabilities.minImageExtent.height);
+        printf ("max extent %dx%d\n",
+                SurfaceCapabilities.maxImageExtent.width,
+                SurfaceCapabilities.maxImageExtent.height);
+        printf ("maxImageArrayLayers: %d\n", SurfaceCapabilities.maxImageArrayLayers);
+        printf ("supportedTransforms: ");
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+            printf ("identity  ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR) {
+            printf ("rotate 90  ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR) {
+            printf ("rotate 180  ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) {
+            printf ("rotate 270  ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_BIT_KHR) {
+            printf ("horizontal mirror  ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_90_BIT_KHR) {
+            printf ("horizontal mirror rotate 90 ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_180_BIT_KHR) {
+            printf ("rotate horizontal mirror rotate 180 ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_270_BIT_KHR) {
+            printf ("rotate horizontal mirror rotate 270 ");
+        }
+        if (SurfaceCapabilities.supportedTransforms &
+                VK_SURFACE_TRANSFORM_INHERIT_BIT_KHR) {
+            printf ("inherit ");
+        }
+        printf ("\n");
+        printf ("currentTransform: ");
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+            printf ("identity  ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR) {
+            printf ("rotate 90  ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR) {
+            printf ("rotate 180  ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) {
+            printf ("rotate 270  ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_BIT_KHR) {
+            printf ("horizontal mirror  ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_90_BIT_KHR) {
+            printf ("horizontal mirror rotate 90 ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_180_BIT_KHR) {
+            printf ("rotate horizontal mirror rotate 180 ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_HORIZONTAL_MIRROR_ROTATE_270_BIT_KHR) {
+            printf ("rotate horizontal mirror rotate 270 ");
+        }
+        if (SurfaceCapabilities.currentTransform &
+                VK_SURFACE_TRANSFORM_INHERIT_BIT_KHR) {
+            printf ("inherit ");
+        }
+        printf ("\n");
+        /*
+            VkCompositeAlphaFlagsKHR         supportedCompositeAlpha;
+            VkImageUsageFlags                supportedUsageFlags;
+            */
+    }
+    if (SwapchainCreateInfo.minImageCount < SurfaceCapabilities.minImageCount) {
+        SwapchainCreateInfo.minImageCount = SurfaceCapabilities.minImageCount;
+    } else if (SwapchainCreateInfo.minImageCount >
+               SurfaceCapabilities.maxImageCount) {
+        SwapchainCreateInfo.minImageCount = SurfaceCapabilities.maxImageCount;
+    }
+    //SwapchainCreateInfo.imageExtent = SurfaceCapabilities.currentExtent;
+
+    /*
+    if (SurfaceCapabilities.currentExtent.width != -1
+            && SurfaceCapabilities.currentExtent.height != -1) {
+        SwapchainCreateInfo.imageExtent = SurfaceCapabilities.currentExtent;
+    }
+    */
+    result = fpGetPhysicalDeviceSurfacePresentModesKHR (physicalDevice, surface,
+             &presentModeCount, presentModes);
+    if (result != VK_SUCCESS) {
+        fprintf (stderr, "%s: can't get physical device present modes: %s\n",
+                 program_name,
+                 get_vulkan_error_string (result));
+        return result;
+    }
+    for (uint32_t i = 0; i < presentModeCount; i++) {
+        if (presentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            SwapchainCreateInfo.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+            break;
+        }
+        if (presentModes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+            SwapchainCreateInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+    return fpCreateSwapchainKHR (device, &SwapchainCreateInfo, NULL, swapchain);
+}
+
 int main (int argc, char *const *argv)
 {
     int error = EXIT_SUCCESS;
     Display *display = NULL;
     VkInstance vk = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkResult result = VK_SUCCESS;
     XInitThreads();
     parse_args (argc, argv);
@@ -413,6 +593,8 @@ int main (int argc, char *const *argv)
     }
 
     main_window = window_create (display, "Vulkan Window", 640, 480);
+    XSync (display, True);
+    XFlush (display);
     if (main_window == NULL) {
         fprintf (stderr, "%s: can't create game window\n", program_name);
         error = EXIT_FAILURE;
@@ -423,11 +605,18 @@ int main (int argc, char *const *argv)
         error = EXIT_FAILURE;
         goto out;
     }
-    if ((result = create_device (vk, &device))) {
+    if ((result = create_device (vk, &physicalDevice, &device))) {
         fprintf (stderr, "%s: can't create vulkan device: %s\n", program_name,
                  get_vulkan_error_string (result));
         error = EXIT_FAILURE;
         goto out;
+    }
+    fpGetPhysicalDeviceSurfaceCapabilitiesKHR =
+        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)vkGetInstanceProcAddr (vk,
+                "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    if (fpGetPhysicalDeviceSurfaceCapabilitiesKHR == NULL) {
+        fprintf (stderr, "%s: no function\n", program_name);
+        return VK_ERROR_INITIALIZATION_FAILED;
     }
     if ((result = create_surface (display, window_get_native (main_window), vk,
                                   &surface))) {
@@ -437,12 +626,20 @@ int main (int argc, char *const *argv)
         goto out;
     }
     vkGetDeviceQueue (device, 0, 0, &queue);
+    if ((result = create_swapchain (physicalDevice, device, surface, &swapchain))) {
+        fprintf (stderr, "%s: can't create swapchain: %s\n", program_name,
+                 get_vulkan_error_string (result));
+        error = EXIT_FAILURE;
+        goto out;
+
+    }
     while (window_is_exists (main_window)) {
         window_process_events (main_window);
         /*game_tick();*/
         /* eglSwapBuffers (egl_display, window_surface);*/
     }
 out:
+    vkDestroySwapchainKHR (device, swapchain, NULL);
     vkDestroySurfaceKHR (vk, surface, NULL);
     vkDestroyDevice (device, NULL);
     vkDestroyInstance (vk, NULL);
