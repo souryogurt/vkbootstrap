@@ -10,16 +10,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <getopt.h>
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-#define VK_USE_PLATFORM_XLIB_KHR
+#include <xcb/xcb.h>
+#define VK_USE_PLATFORM_XCB_KHR
 #include <vulkan/vulkan.h>
 
 /** Window type */
 typedef struct game_window_t {
-    Display *display; /**< X11 connection for this window */
-    Atom wm_delete_window; /**< Atom to receive "window closed" message */
-    Window xwindow; /**< Native X11 window */
+    xcb_connection_t *connection; /**< xcb connection for this window */
+    xcb_atom_t wm_delete_window; /**< Atom to receive "window closed" message */
+    xcb_window_t window_id;
     int is_closed; /**< true if window is closed */
     int width; /**< Width of window's client area */
     int height; /**< Height of window's client area */
@@ -53,17 +52,6 @@ static struct option const long_options[] = {
 
 #define MAX_PHYSICAL_DEVICES 100
 #define MAX_QUEUE_FAMILY_PROPERTIES 100
-PFN_vkGetPhysicalDeviceSurfaceSupportKHR fpGetPhysicalDeviceSurfaceSupportKHR;
-PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR
-fpGetPhysicalDeviceSurfaceCapabilitiesKHR;
-PFN_vkGetPhysicalDeviceSurfaceFormatsKHR fpGetPhysicalDeviceSurfaceFormatsKHR;
-PFN_vkGetPhysicalDeviceSurfacePresentModesKHR
-fpGetPhysicalDeviceSurfacePresentModesKHR;
-PFN_vkCreateSwapchainKHR fpCreateSwapchainKHR;
-PFN_vkDestroySwapchainKHR fpDestroySwapchainKHR;
-PFN_vkGetSwapchainImagesKHR fpGetSwapchainImagesKHR;
-PFN_vkAcquireNextImageKHR fpAcquireNextImageKHR;
-PFN_vkQueuePresentKHR fpQueuePresentKHR;
 static const VkApplicationInfo pApplicationInfo = {
     .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
     .pNext = NULL,
@@ -71,10 +59,10 @@ static const VkApplicationInfo pApplicationInfo = {
     .applicationVersion = 0x00000100,
     .pEngineName = NULL,
     .engineVersion = 0,
-    .apiVersion = VK_API_VERSION_1_0,
+    .apiVersion = VK_MAKE_VERSION (1, 0, 3),
 };
 static const char *const ppEnabledInstanceExtensionNames[] = {
-    VK_KHR_XLIB_SURFACE_EXTENSION_NAME
+    VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME,
 };
 static const VkInstanceCreateInfo instanceCreateInfo = {
     .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -83,7 +71,7 @@ static const VkInstanceCreateInfo instanceCreateInfo = {
     .pApplicationInfo = &pApplicationInfo,
     .enabledLayerCount = 0,
     .ppEnabledLayerNames = NULL,
-    .enabledExtensionCount = 1,
+    .enabledExtensionCount = 2,
     .ppEnabledExtensionNames = ppEnabledInstanceExtensionNames,
 };
 /** Print usage information */
@@ -103,25 +91,31 @@ static void print_usage (void)
  */
 static void window_process_events (game_window_t *window)
 {
-    int n_events = XPending (window->display);
-    while (n_events > 0) {
-        XEvent event;
-        XNextEvent (window->display, &event);
-        if (event.type == ClientMessage) {
-            if ((Atom)event.xclient.data.l[0] == window->wm_delete_window) {
-                window->is_closed = 1;
-            }
-        } else if (event.type == ConfigureNotify) {
-            XConfigureEvent xce;
-            xce = event.xconfigure;
-            if ((xce.width != window->width)
-                    || (xce.height != window->height)) {
-                window->width = xce.width;
-                window->height = xce.height;
-                /*game_resize (window->width, window->height);*/
-            }
+    xcb_generic_event_t *event = NULL;
+    xcb_client_message_event_t *client_message = NULL;
+    xcb_configure_notify_event_t *configure_event = NULL;
+    int size_changed = 0;
+    while ((event = xcb_poll_for_event (window->connection))) {
+        switch (event->response_type & ~0x80) {
+            case XCB_CLIENT_MESSAGE:
+                client_message = (xcb_client_message_event_t *)event;
+                if (client_message->data.data32[0] == window->wm_delete_window) {
+                    window->is_closed = 1;
+                }
+                break;
+            case XCB_CONFIGURE_NOTIFY:
+                configure_event = (xcb_configure_notify_event_t *)event;
+                size_changed = (configure_event->width != window->width)
+                               || (configure_event->height != window->height);
+                if (size_changed) {
+                    window->width = configure_event->width;
+                    window->height = configure_event->height;
+                    /*game_resize (window->width, window->height);*/
+                }
+                break;
+            default:
+                break;
         }
-        n_events--;
     }
 }
 
@@ -139,7 +133,7 @@ static int window_is_exists (game_window_t *window)
 static void window_destroy (game_window_t *window)
 {
     if (window != NULL) {
-        XDestroyWindow (window->display, window->xwindow);
+        xcb_destroy_window (window->connection, window->window_id);
         free (window);
     }
 }
@@ -147,50 +141,56 @@ static void window_destroy (game_window_t *window)
 /** Get native window handle of game window
  * @param window target game window object
  */
-static Window window_get_native (game_window_t *window)
+static xcb_window_t window_get_native (game_window_t *window)
 {
-    return window->xwindow;
+    return window->window_id;
 }
 
 /** Create and display new window
- * @param display The display where window should be created
+ * @param connection The connection to display where window should be created
  * @param caption The caption of window in Host Portable Character Encoding
  * @param width The width of the window's client area
  * @param height The height of the window's client area
- * @param visual_id VisualID of Visual that should be used to create a window
  * @returns new window object, NULL otherwise
  */
-static game_window_t *window_create (Display *display, const char *caption,
-                                     unsigned int width, unsigned int height)
+static game_window_t *window_create (xcb_connection_t *connection,
+                                     const char *caption,
+                                     uint16_t width, uint16_t height)
 {
-    int screen = DefaultScreen (display);
-    Visual *visual = DefaultVisual (display, screen);
+    const xcb_setup_t *setup = xcb_get_setup (connection);
+    xcb_screen_iterator_t iter = xcb_setup_roots_iterator (setup);
+    xcb_screen_t *screen = iter.data;
     game_window_t *window = NULL;
     window = (game_window_t *)malloc (sizeof (game_window_t));
     if (window != NULL) {
-        const unsigned long attributes_mask = CWBorderPixel | CWColormap |
-                                              CWEventMask;
-        XSetWindowAttributes window_attributes;
-        Window root = RootWindow (display, screen);
-        window->display = display;
+        const uint32_t mask = XCB_CW_EVENT_MASK;
+        const uint32_t values[] = {XCB_EVENT_MASK_STRUCTURE_NOTIFY};
+        xcb_intern_atom_cookie_t delete_cookie = xcb_intern_atom (connection,
+                0, strlen ("WM_DELETE_WINDOW"), "WM_DELETE_WINDOW");
+        xcb_intern_atom_cookie_t protocols_cookie = xcb_intern_atom (connection,
+                0, strlen ("WM_PROTOCOLS"), "WM_PROTOCOLS");
+        xcb_intern_atom_reply_t *delete_reply = xcb_intern_atom_reply (connection,
+                                                delete_cookie, NULL);
+        xcb_intern_atom_reply_t *protocols_reply = xcb_intern_atom_reply (connection,
+                protocols_cookie, NULL);
+        window->connection = connection;
         window->is_closed = 0;
         window->width = 0;
         window->height = 0;
-        window_attributes.colormap = XCreateColormap (display, root,
-                                     visual, AllocNone);
-        window_attributes.background_pixmap = None;
-        window_attributes.border_pixel = 0;
-        window_attributes.event_mask = StructureNotifyMask;
-        window->xwindow = XCreateWindow (display, root, 0, 0, width, height,
-                                         0, DefaultDepth (display, screen),
-                                         InputOutput, visual, attributes_mask,
-                                         &window_attributes);
-        XStoreName (display, window->xwindow, caption);
-        XMapWindow (display, window->xwindow);
-        window->wm_delete_window = XInternAtom (display, "WM_DELETE_WINDOW",
-                                                False);
-        XSetWMProtocols (display, window->xwindow,
-                         &window->wm_delete_window, 1);
+        window->window_id = xcb_generate_id (connection);
+        xcb_create_window (connection, XCB_COPY_FROM_PARENT, window->window_id,
+                           screen->root, 0, 0, width, height, 0,
+                           XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
+                           mask, values);
+        xcb_change_property (connection, XCB_PROP_MODE_REPLACE,
+                             window->window_id, XCB_ATOM_WM_NAME,
+                             XCB_ATOM_STRING, 8, (uint32_t)strlen (caption), caption);
+
+        window->wm_delete_window = delete_reply->atom;
+        xcb_change_property (connection, XCB_PROP_MODE_REPLACE, window->window_id,
+                             protocols_reply->atom, 4, 32, 1, &delete_reply->atom);
+        xcb_map_window (connection, window->window_id);
+        xcb_flush (connection);
     }
     return window;
 }
@@ -393,17 +393,18 @@ get_vulkan_error_string (VkResult result)
 }
 
 static VkResult
-create_surface (Display *display, Window window, VkInstance vk,
+create_surface (xcb_connection_t *connection, xcb_window_t window,
+                VkInstance vk,
                 VkSurfaceKHR *surface)
 {
-    VkXlibSurfaceCreateInfoKHR SurfaceCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+    VkXcbSurfaceCreateInfoKHR SurfaceCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
         .pNext = NULL,
         .flags = 0,
-        .dpy = display,
+        .connection = connection,
         .window = window,
     };
-    return vkCreateXlibSurfaceKHR (vk, &SurfaceCreateInfo, NULL, surface);
+    return vkCreateXcbSurfaceKHR (vk, &SurfaceCreateInfo, NULL, surface);
 }
 
 static VkResult
@@ -435,7 +436,7 @@ create_swapchain (VkPhysicalDevice physicalDevice, VkDevice device,
         .clipped = VK_TRUE,
         .oldSwapchain = NULL,
     };
-    result = fpGetPhysicalDeviceSurfaceCapabilitiesKHR (physicalDevice, surface,
+    result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR (physicalDevice, surface,
              &SurfaceCapabilities);
     if (result != VK_SUCCESS) {
         fprintf (stderr, "%s: can't get physical device capabilities: %s\n",
@@ -551,7 +552,7 @@ create_swapchain (VkPhysicalDevice physicalDevice, VkDevice device,
         SwapchainCreateInfo.imageExtent = SurfaceCapabilities.currentExtent;
     }
     */
-    result = fpGetPhysicalDeviceSurfacePresentModesKHR (physicalDevice, surface,
+    result = vkGetPhysicalDeviceSurfacePresentModesKHR (physicalDevice, surface,
              &presentModeCount, presentModes);
     if (result != VK_SUCCESS) {
         fprintf (stderr, "%s: can't get physical device present modes: %s\n",
@@ -568,13 +569,13 @@ create_swapchain (VkPhysicalDevice physicalDevice, VkDevice device,
             SwapchainCreateInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
     }
-    return fpCreateSwapchainKHR (device, &SwapchainCreateInfo, NULL, swapchain);
+    return vkCreateSwapchainKHR (device, &SwapchainCreateInfo, NULL, swapchain);
 }
 
 int main (int argc, char *const *argv)
 {
     int error = EXIT_SUCCESS;
-    Display *display = NULL;
+    xcb_connection_t *connection = NULL;
     VkInstance vk = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
@@ -582,19 +583,16 @@ int main (int argc, char *const *argv)
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkResult result = VK_SUCCESS;
-    XInitThreads();
     parse_args (argc, argv);
 
-    display = XOpenDisplay (NULL);
-    if (display == NULL) {
+    connection = xcb_connect (NULL, NULL);
+    if (connection == NULL) {
         fprintf (stderr, "%s: can't connect to X server\n", program_name);
         error = EXIT_FAILURE;
         goto out;
     }
 
-    main_window = window_create (display, "Vulkan Window", 640, 480);
-    XSync (display, True);
-    XFlush (display);
+    main_window = window_create (connection, "Vulkan Window", 640, 480);
     if (main_window == NULL) {
         fprintf (stderr, "%s: can't create game window\n", program_name);
         error = EXIT_FAILURE;
@@ -611,14 +609,7 @@ int main (int argc, char *const *argv)
         error = EXIT_FAILURE;
         goto out;
     }
-    fpGetPhysicalDeviceSurfaceCapabilitiesKHR =
-        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)vkGetInstanceProcAddr (vk,
-                "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
-    if (fpGetPhysicalDeviceSurfaceCapabilitiesKHR == NULL) {
-        fprintf (stderr, "%s: no function\n", program_name);
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-    if ((result = create_surface (display, window_get_native (main_window), vk,
+    if ((result = create_surface (connection, window_get_native (main_window), vk,
                                   &surface))) {
         fprintf (stderr, "%s: can't create surface: %s\n", program_name,
                  get_vulkan_error_string (result));
@@ -644,6 +635,6 @@ out:
     vkDestroyDevice (device, NULL);
     vkDestroyInstance (vk, NULL);
     window_destroy (main_window);
-    XCloseDisplay (display);
+    xcb_disconnect (connection);
     return error;
 }
