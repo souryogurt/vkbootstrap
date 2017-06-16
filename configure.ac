@@ -13,6 +13,7 @@ AC_PROG_CC
 
 # Checks for libraries.
 PKG_CHECK_MODULES([XCB], [xcb >= 1.12])
+PKG_CHECK_MODULES([VULKAN], [vulkan >= 1.0])
 AC_SEARCH_LIBS([vkGetInstanceProcAddr], [vulkan])
 # Checks for header files.
 AC_CHECK_HEADERS([stdlib.h string.h])
